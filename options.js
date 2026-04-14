@@ -3,7 +3,7 @@ const DEFAULTS = {
   siteOverrides: {},
   theme: {
     brightness: 92,
-    contrast: 108,
+    contrast: 102,
     sepia: 4,
     grayscale: 0,
     hue: 0,
