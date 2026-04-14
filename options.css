@@ -1,0 +1,89 @@
+body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; background: #111; color: #eee; }
+main { max-width: 720px; margin: 0 auto; }
+section { margin: 24px 0; padding: 16px; border: 1px solid #333; border-radius: 12px; background: #181818; }
+label { display: flex; justify-content: space-between; gap: 12px; margin: 12px 0; }
+input[type='range'], input[type='color'] { width: 240px; }
+button { background: #ff6262; border: 0; color: white; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
+.site-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #2a2a2a; }
+.site-row:last-child { border-bottom: 0; }
+.preview-pane { 
+  margin-top: 16px; 
+  padding: 16px; 
+  border: 1px solid #444; 
+  border-radius: 8px; 
+  background: #1e1e1e;
+}
+
+/* Apply the same styling as content.js for proper preview */
+.preview-pane {
+  color-scheme: dark !important;
+  background: var(--ldr-bg, #111827) !important;
+  color: var(--ldr-fg, #e5e7eb) !important;
+}
+
+/* Apply filter for light mode preview (same as content.js) */
+.preview-pane[data-free-dark-mode-mode="light"] {
+  filter: brightness(var(--ldr-brightness, 92%)) contrast(var(--ldr-contrast, 108%)) sepia(var(--ldr-sepia, 4%)) grayscale(var(--ldr-grayscale, 0%)) hue-rotate(var(--ldr-hue, 0deg)) !important;
+}
+
+/* Apply filter for dark mode preview (same as content.js) */
+.preview-pane[data-free-dark-mode-mode="dark"] {
+  filter: brightness(100%) contrast(102%) saturate(100%) !important;
+}
+
+/* Override specific elements in preview to match content.js styling */
+.preview-pane body,
+.preview-pane :is(main, article, section, nav, header, footer, aside, pre, code, blockquote, form, table, thead, tbody, tr) {
+  background-color: transparent !important;
+  color: inherit !important;
+  border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
+}
+
+.preview-pane :is(h1, h2, h3, h4, h5, h6) {
+  color: var(--ldr-fg, #e5e7eb) !important;
+}
+
+.preview-pane a,
+.preview-pane a:visited {
+  color: var(--ldr-link, #93c5fd) !important;
+}
+
+.preview-pane :is(button, input, textarea, select) {
+  background-color: var(--ldr-surface, rgba(255, 255, 255, 0.06)) !important;
+  color: inherit !important;
+  border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
+  color-scheme: dark !important;
+}
+
+.preview-pane :is(input::placeholder, textarea::placeholder) {
+  color: rgba(229, 231, 235, 0.72) !important;
+}
+
+.preview-pane :is(img, video, canvas, iframe, embed, object, picture, svg) {
+  filter: none !important;
+  mix-blend-mode: normal !important;
+}
+
+.preview-pane ::selection {
+  background: rgba(147, 197, 253, 0.35) !important;
+  color: #fff !important;
+}
+/* Modal library previews */
+.preview-pane .modal-backdrop,
+.preview-pane .modal-backdrop.show {
+  background-color: rgba(0,0,0,0.6) !important;
+}
+.preview-pane .modal-content,
+.preview-pane .ant-modal-content,
+.preview-pane .swal2-popup,
+.preview-pane .tippy-box {
+  background-color: var(--ldr-surface, rgba(255,255,255,0.06)) !important;
+  color: var(--ldr-fg, #e5e7eb) !important;
+}
+.preview-content { max-width: 500px; }
+.preview-link { color: #93c5fd; text-decoration: none; }
+.preview-link:hover { text-decoration: underline; }
+.preview-button { background: #4a90e2; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
+.preview-button:hover { background: #357ab8; }
+.preview-input, .preview-textarea { width: 100%; padding: 8px; margin: 8px 0; border: 1px solid #444; border-radius: 4px; background: #2a2a2a; color: #eee; }
+.preview-input:focus, .preview-textarea:focus { border-color: #4a90e2; outline: none; }

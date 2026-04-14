@@ -1,0 +1,13 @@
+{
+  "name": "free-dark-mode",
+  "private": true,
+  "version": "0.2.0",
+  "description": "Privacy-first Chrome extension for local dark mode styling.",
+  "scripts": {
+    "test": "node scripts/test-extension.js",
+    "generate-icons": "node scripts/generate-icons.js"
+  },
+  "devDependencies": {
+    "sharp": "^0.34.5"
+  }
+}

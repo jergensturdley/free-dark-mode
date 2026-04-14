@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Free Dark Mode Settings</h1>
+
+      <section>
+        <h2>General</h2>
+        <label style="font-weight: bold; font-size: 1.1em;">
+          Enable Dark Reader Globally 
+          <input id="global-enable" type="checkbox" />
+        </label>
+      </section>
+
+      <section>
+        <h2>Global tuning</h2>
+        <label>Brightness <input id="brightness" type="range" min="80" max="120" value="100" /></label>
+        <label>Contrast <input id="contrast" type="range" min="80" max="120" value="100" /></label>
+        <label>Sepia <input id="sepia" type="range" min="0" max="40" value="0" /></label>
+        <label>Grayscale <input id="grayscale" type="range" min="0" max="30" value="0" /></label>
+        <label>Hue rotate <input id="hue" type="range" min="0" max="360" value="180" /></label>
+      </section>
+
+      <section>
+        <h2>Color Customization</h2>
+        <label>Background Color <input id="bg" type="color" value="#111827" /></label>
+        <label>Foreground Color <input id="fg" type="color" value="#e5e7eb" /></label>
+        <label>Link Color <input id="link" type="color" value="#93c5fd" /></label>
+        <div>
+          <label>Border Color</label>
+          <div style="display: flex; gap: 12px; align-items: center;">
+            <input id="border-color" type="color" value="#ffffff" />
+            <input id="border-opacity" type="range" min="0" max="100" value="14" />
+            <span id="border-opacity-value">14%</span>
+          </div>
+          <small style="color: #888;">Adjust color and opacity</small>
+        </div>
+        <div style="margin-top: 12px;">
+          <label>Surface Color</label>
+          <div style="display: flex; gap: 12px; align-items: center;">
+            <input id="surface-color" type="color" value="#ffffff" />
+            <input id="surface-opacity" type="range" min="0" max="100" value="6" />
+            <span id="surface-opacity-value">6%</span>
+          </div>
+          <small style="color: #888;">Adjust color and opacity</small>
+        </div>
+      </section>
+
+      <section>
+        <h2>Live Preview</h2>
+        <div id="preview-pane" class="preview-pane">
+          <div class="preview-content">
+            <h3>Preview</h3>
+            <p>This is a sample text to preview how your theme looks.</p>
+            <a href="#" class="preview-link">Sample Link</a>
+            <br><br>
+            <button class="preview-button" type="button">Sample Button</button>
+            <br>
+            <input type="text" class="preview-input" placeholder="Sample input" />
+            <textarea class="preview-textarea" placeholder="Sample textarea"></textarea>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Per-site disables</h2>
+        <p>Manage websites where Free Dark Mode behaves differently.</p>
+        <div style="display: flex; gap: 8px; margin-bottom: 4px;">
+          <input id="add-site-input" type="text" placeholder="example.com" style="flex: 1; padding: 8px; border-radius: 4px; border: 1px solid #444; background: #222; color: white;" />
+          <button id="add-site-btn" type="button" style="background: #4a90e2;">Add Site</button>
+        </div>
+        <div id="add-site-error" style="color: #ff6262; font-size: 0.9em; min-height: 1.2em; margin-bottom: 12px;"></div>
+        <div id="site-list"></div>
+      </section>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>
