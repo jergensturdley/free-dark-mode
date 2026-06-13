@@ -3,7 +3,7 @@
   "name": "Free Dark Mode",
   "version": "0.2.0",
   "description": "A privacy-first, local-only dark mode extension.",
-  "permissions": ["storage", "tabs"],
+  "permissions": ["storage", "tabs", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

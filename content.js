@@ -1,8 +1,15 @@
 (() => {
+  if (window.__freeDarkModeContentScriptLoaded) return;
+  window.__freeDarkModeContentScriptLoaded = true;
+
   const STYLE_ID = 'free-dark-mode-style';
   const ROOT_ATTR = 'data-free-dark-mode';
   const MODE_ATTR = 'data-free-dark-mode-mode';
+  const SITE_ATTR = 'data-free-dark-mode-site';
   const MIXED_SURFACE_ATTR = 'data-free-dark-mode-mixed-surface';
+  const TAG_SURFACE_ATTR = 'data-free-dark-mode-tag';
+  const CUSTOM_OVERRIDE_ATTR = 'data-free-dark-mode-custom';
+  const PICKER_OVERLAY_ID = 'free-dark-mode-picker-overlay';
 
   const SITE_FIXES = {
     'alternativeto.net': {
@@ -11,27 +18,346 @@
     },
   };
 
+  let hasRevealedPage = false;
+  let siteElementOverrides = {};
+  let pickerCleanup = null;
+  let pageObserver = null;
+  let modeTimerIds = [];
+  let isApplyingInternalStyles = false;
+  let restyleQueued = false;
+
+  // WeakMap cache: element → last-seen luminance key used to mark it as a mixed
+  // surface. Lets markMixedSurfaces() skip re-processing elements whose
+  // background hasn't changed, preventing repeated attribute churn on SPAs.
+  const mixedSurfaceCache = new WeakMap();
+
+  function isAlternativeToSite() {
+    return getHost(location.href) === 'alternativeto.net';
+  }
+
+  function findOpaqueBackgroundOwner(el) {
+    let node = el;
+    while (node && node.nodeType === 1) {
+      const bg = parseRgba(getComputedStyle(node).backgroundColor);
+      if (bg && bg.a > 0.85) return { element: node, bg };
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function toCssColor(color, fallback) {
+    if (typeof color === 'string' && color.trim()) return color;
+    return fallback;
+  }
+
+  function runWithInternalStyleGuard(fn) {
+    isApplyingInternalStyles = true;
+    try {
+      fn();
+    } finally {
+      isApplyingInternalStyles = false;
+    }
+  }
+
+  function performRestylePass() {
+    const mode = document.documentElement.getAttribute(MODE_ATTR);
+    if (mode === 'mixed' || isAlternativeToSite()) {
+      markMixedSurfaces();
+      applyDirectDarkening();
+    }
+    applyElementOverrides();
+  }
+
+  // Restyle debounce: microtask is too eager for heavy mixed-surface scans on
+  // large pages triggered by MutationObserver burst. Use a short timer instead
+  // so many rapid mutations collapse into a single pass.
+  const RESTYLE_DEBOUNCE_MS = 120;
+  let restyleTimer = null;
+
+  function queueRestylePass() {
+    if (restyleQueued || isApplyingInternalStyles) return;
+    restyleQueued = true;
+    const mode = document.documentElement.getAttribute(MODE_ATTR);
+    const isCheap = mode === 'light' || mode === 'dark';
+    if (isCheap) {
+      // Light and dark modes only need a cheap element-override pass — microtask is fine.
+      queueMicrotask(() => {
+        restyleQueued = false;
+        runWithInternalStyleGuard(() => performRestylePass());
+      });
+    } else {
+      // Mixed mode scans the whole DOM; debounce to avoid layout thrash.
+      if (restyleTimer) clearTimeout(restyleTimer);
+      restyleTimer = setTimeout(() => {
+        restyleQueued = false;
+        restyleTimer = null;
+        runWithInternalStyleGuard(() => performRestylePass());
+      }, RESTYLE_DEBOUNCE_MS);
+    }
+  }
+
+  function clearElementOverrides() {
+    runWithInternalStyleGuard(() => {
+      document.querySelectorAll(`[${CUSTOM_OVERRIDE_ATTR}="on"]`).forEach((el) => {
+        if (!(el instanceof HTMLElement)) return;
+        el.style.removeProperty('background-color');
+        el.style.removeProperty('color');
+        el.style.removeProperty('border-color');
+        el.removeAttribute(CUSTOM_OVERRIDE_ATTR);
+      });
+    });
+  }
+
+  function applyElementOverrides() {
+    clearElementOverrides();
+
+    runWithInternalStyleGuard(() => {
+      for (const [selector, colors] of Object.entries(siteElementOverrides || {})) {
+        let nodes;
+        try {
+          nodes = document.querySelectorAll(selector);
+        } catch {
+          continue;
+        }
+
+        nodes.forEach((el) => {
+          if (!(el instanceof HTMLElement)) return;
+          el.setAttribute(CUSTOM_OVERRIDE_ATTR, 'on');
+          el.style.setProperty('background-color', toCssColor(colors.bg, currentTheme.surface), 'important');
+          el.style.setProperty('color', toCssColor(colors.fg, currentTheme.fg), 'important');
+          el.style.setProperty('border-color', toCssColor(colors.border, currentTheme.border), 'important');
+        });
+      }
+    });
+  }
+
+  function describeElement(el) {
+    const tag = el.tagName.toLowerCase();
+    const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+    const className = typeof el.className === 'string' ? el.className.trim().split(/\s+/).slice(0, 2).join('.') : '';
+    if (text) return `${tag}${className ? `.${className}` : ''} — ${text}`;
+    if (className) return `${tag}.${className}`;
+    if (el.id) return `${tag}#${el.id}`;
+    return tag;
+  }
+
+  // Regex for class names generated by CSS-in-JS / hashed tooling — these are
+  // unstable across deploys and must be excluded from saved selectors.
+  const UNSTABLE_CLASS_RE = /^([a-z]{0,3}[0-9]{3,}|[a-z0-9]{7,}[-_][a-z0-9]+|css-[a-z0-9]+)$/i;
+
+  function selectorSegment(el) {
+    const tag = el.tagName.toLowerCase();
+    if (el.id) return `${tag}#${CSS.escape(el.id)}`;
+
+    // Prefer stable semantic attributes over class names
+    const role = el.getAttribute('role');
+    if (role && /^(main|navigation|banner|contentinfo|complementary|form|search|region|dialog|menu|menuitem|listbox|option|tree|treeitem|tab|tabpanel|article|list|listitem|group|toolbar|tooltip)$/.test(role)) {
+      let segment = `${tag}[role="${role}"]`;
+      if (el.parentElement) {
+        const siblings = Array.from(el.parentElement.children).filter((n) => n.getAttribute('role') === role);
+        if (siblings.length > 1) segment += `:nth-of-type(${Array.from(el.parentElement.children).indexOf(el) + 1})`;
+      }
+      return segment;
+    }
+
+    // Stable data-* attributes (e.g. data-testid, data-component, data-block)
+    const stableDataAttr = ['data-testid', 'data-id', 'data-key', 'data-component', 'data-block', 'data-section']
+      .find((attr) => el.hasAttribute(attr));
+    if (stableDataAttr) return `${tag}[${stableDataAttr}="${CSS.escape(el.getAttribute(stableDataAttr))}"]`;
+
+    // Stable aria attributes
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel && ariaLabel.length < 40) return `${tag}[aria-label="${CSS.escape(ariaLabel)}"]`;
+
+    // Filter out state tokens and unstable generated class names
+    const classes = typeof el.className === 'string'
+      ? el.className.trim().split(/\s+/).filter(
+          (name) => name
+            && !/^(active|selected|hover|focus|open|disabled|visible|hidden|show|is-|has-)$/i.test(name)
+            && !UNSTABLE_CLASS_RE.test(name)
+        ).slice(0, 2)
+      : [];
+    let segment = tag;
+    if (classes.length) {
+      segment += classes.map((name) => `.${CSS.escape(name)}`).join('');
+    }
+
+    if (el.parentElement) {
+      const siblings = Array.from(el.parentElement.children).filter((node) => node.tagName === el.tagName);
+      if (siblings.length > 1) {
+        segment += `:nth-of-type(${siblings.indexOf(el) + 1})`;
+      }
+    }
+
+    return segment;
+  }
+
+  function buildElementSelector(el) {
+    const segments = [];
+    let node = el;
+    while (node && node.nodeType === 1 && segments.length < 6) {
+      segments.unshift(selectorSegment(node));
+      if (node.id || node.getAttribute('data-testid') || node.getAttribute('data-id')) break;
+      node = node.parentElement;
+    }
+    return segments.join(' > ');
+  }
+
+  function getElementDisplayColors(el) {
+    const style = getComputedStyle(el);
+    const owner = findOpaqueBackgroundOwner(el);
+    return {
+      bg: owner ? styleColorToHex(owner.bg) : currentTheme.surface,
+      fg: styleColorToHex(parseRgba(style.color)) || currentTheme.fg,
+      border: styleColorToHex(parseRgba(style.borderTopColor)) || currentTheme.border,
+    };
+  }
+
+  function styleColorToHex(color) {
+    if (!color) return null;
+    const value = typeof color === 'string' ? parseRgba(color) : color;
+    if (!value) return null;
+    const toHex = (num) => Number(num).toString(16).padStart(2, '0');
+    return `#${toHex(value.r)}${toHex(value.g)}${toHex(value.b)}`;
+  }
+
+  function stopPickerMode() {
+    if (pickerCleanup) {
+      pickerCleanup();
+      pickerCleanup = null;
+    }
+  }
+
+  function clearScheduledModeChecks() {
+    for (const timerId of modeTimerIds) {
+      clearTimeout(timerId);
+    }
+    modeTimerIds = [];
+  }
+
+  async function refreshElementOverrides() {
+    const { elementOverrides, theme } = await chrome.runtime.sendMessage({ type: 'get-state' });
+    const host = getHost(location.href);
+    siteElementOverrides = { ...(elementOverrides?.[host] || {}) };
+    setTheme(theme);
+    applyElementOverrides();
+  }
+
+  function startPickerMode() {
+    stopPickerMode();
+
+    const overlay = document.createElement('div');
+    overlay.id = PICKER_OVERLAY_ID;
+    overlay.style.position = 'fixed';
+    overlay.style.zIndex = '2147483647';
+    overlay.style.pointerEvents = 'none';
+    overlay.style.border = '2px solid #7dd3fc';
+    overlay.style.background = 'rgba(125, 211, 252, 0.12)';
+    overlay.style.borderRadius = '8px';
+    overlay.style.boxSizing = 'border-box';
+    overlay.style.left = '-9999px';
+    overlay.style.top = '-9999px';
+    document.documentElement.appendChild(overlay);
+
+    const updateOverlay = (target) => {
+      if (!(target instanceof HTMLElement)) return;
+      const rect = target.getBoundingClientRect();
+      overlay.style.left = `${rect.left}px`;
+      overlay.style.top = `${rect.top}px`;
+      overlay.style.width = `${rect.width}px`;
+      overlay.style.height = `${rect.height}px`;
+    };
+
+    const onMove = (event) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && target !== overlay) {
+        updateOverlay(target);
+      }
+    };
+
+    const finish = () => {
+      document.removeEventListener('mousemove', onMove, true);
+      document.removeEventListener('click', onClick, true);
+      document.removeEventListener('keydown', onKeyDown, true);
+      overlay.remove();
+      document.documentElement.style.removeProperty('cursor');
+    };
+
+    const onClick = async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || target === overlay) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+
+      const selection = {
+        host: getHost(location.href),
+        selector: buildElementSelector(target),
+        label: describeElement(target),
+        ...getElementDisplayColors(target),
+      };
+
+      await chrome.runtime.sendMessage({ type: 'set-picker-selection', selection });
+      finish();
+      pickerCleanup = null;
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        finish();
+        pickerCleanup = null;
+      }
+    };
+
+    document.documentElement.style.setProperty('cursor', 'crosshair', 'important');
+    document.addEventListener('mousemove', onMove, true);
+    document.addEventListener('click', onClick, true);
+    document.addEventListener('keydown', onKeyDown, true);
+
+    pickerCleanup = finish;
+  }
+
   function applyDirectDarkening() {
     const host = getHost(location.href);
     const siteFix = SITE_FIXES[host];
     if (!siteFix?.useDirectDarkening) return;
 
-    const elements = document.querySelectorAll('div, article, section, li');
-    elements.forEach(el => {
-      const style = window.getComputedStyle(el);
-      const bg = style.backgroundColor;
-      
-      if (bg && bg.includes('rgb(')) {
-        const rgb = bg.match(/\d+/g);
-        if (rgb && rgb.length >= 3) {
-          const [r, g, b] = rgb.map(Number);
-          const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-          
-          if (luminance > 0.5) {
-            el.style.setProperty('background-color', '#1a1f2e', 'important');
+    const elements = document.querySelectorAll('main, article, section, div, li, form, aside, dialog, a, button, span');
+    const darkened = new Set();
+    const lightnessThreshold = (currentTheme.detectLightness ?? DEFAULT_THEME.detectLightness) / 100;
+
+    runWithInternalStyleGuard(() => {
+      elements.forEach((el) => {
+        if (!(el instanceof HTMLElement)) return;
+        if (el === document.body || el === document.documentElement) return;
+        const isTagLike = currentTheme.detectTags && isPotentialTagElement(el);
+
+        const rect = el.getBoundingClientRect();
+        if (!isTagLike && (rect.width < 120 || rect.height < 48)) return;
+        if (isTagLike && (rect.width < 28 || rect.height < 20)) return;
+
+        const owner = findOpaqueBackgroundOwner(el);
+        if (!owner) return;
+
+        const { element, bg } = owner;
+        if (!(element instanceof HTMLElement)) return;
+        if (darkened.has(element)) return;
+
+        if (luminance(bg) > lightnessThreshold) {
+          darkened.add(element);
+          element.setAttribute(MIXED_SURFACE_ATTR, 'on');
+          if (isTagLike || isPotentialTagElement(element)) {
+            element.setAttribute(TAG_SURFACE_ATTR, 'on');
+            element.style.setProperty('background-color', 'var(--ldr-tag-bg, rgba(147, 197, 253, 0.18))', 'important');
+            element.style.setProperty('color', 'var(--ldr-tag-fg, #dbeafe)', 'important');
+            element.style.setProperty('border-color', 'var(--ldr-tag-border, rgba(147, 197, 253, 0.34))', 'important');
+          } else {
+            element.style.setProperty('background-color', 'var(--ldr-surface, rgba(255, 255, 255, 0.06))', 'important');
+            element.style.setProperty('color', 'var(--ldr-fg, #e5e7eb)', 'important');
+            element.style.setProperty('border-color', 'var(--ldr-border, rgba(255, 255, 255, 0.14))', 'important');
           }
         }
-      }
+      });
     });
   }
 
@@ -45,8 +371,16 @@
     fg: '#e5e7eb',
     link: '#93c5fd',
     border: 'rgba(255, 255, 255, 0.14)',
-    surface: 'rgba(255, 255, 255, 0.06)'
+    surface: 'rgba(255, 255, 255, 0.06)',
+    tagBg: 'rgba(147, 197, 253, 0.18)',
+    tagFg: '#dbeafe',
+    tagBorder: 'rgba(147, 197, 253, 0.34)',
+    detectLightness: 58,
+    detectOpacity: 60,
+    detectTags: true
   };
+
+  let currentTheme = { ...DEFAULT_THEME };
 
   function getHost(url) {
     try {
@@ -91,6 +425,36 @@
     return null;
   }
 
+  function isPotentialTagElement(el) {
+    if (!(el instanceof HTMLElement)) return false;
+
+    const tagName = el.tagName.toLowerCase();
+    if (!['a', 'button', 'span', 'div', 'li'].includes(tagName)) return false;
+
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 28 || rect.width > 260 || rect.height < 20 || rect.height > 44) return false;
+
+    const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+    if (text.length < 2 || text.length > 48) return false;
+
+    const classText = [
+      typeof el.className === 'string' ? el.className : '',
+      el.id || '',
+      el.getAttribute('aria-label') || '',
+      el.getAttribute('data-testid') || ''
+    ].join(' ').toLowerCase();
+    const href = el.getAttribute('href') || '';
+    const hasKeyword = /\b(tag|badge|chip|pill|platform|license|category|label)\b/.test(classText);
+    const hasStructuredLink = href.includes('/browse/all/?tag=')
+      || href.includes('/platform/')
+      || href.includes('/category/')
+      || href.includes('/license/');
+    const style = getComputedStyle(el);
+    const rounded = parseFloat(style.borderTopLeftRadius || '0') >= 8;
+
+    return hasKeyword || hasStructuredLink || rounded;
+  }
+
   // ---------------------------------------------------------------------------
   // Dark-page detection — layered heuristics (strongest signal first)
   // ---------------------------------------------------------------------------
@@ -107,21 +471,28 @@
       if (dataColorMode === 'dark' || (dataColorMode === 'auto' && prefersDark)) return true;
     }
 
-    // 2. Common theme data attributes
+    // 2. Common theme data attributes — extended to cover more frameworks:
+    // Tailwind (data-theme), Bootstrap 5 (data-bs-theme), Mantine, Radix,
+    // shadcn/ui (data-theme), Next.js next-themes (data-theme on <html>),
+    // Chakra UI (data-theme), Ant Design (data-theme), Vuetify (data-theme)
     const themeAttrs = [
       html.getAttribute('data-theme'),
       body ? body.getAttribute('data-theme') : null,
       html.getAttribute('data-bs-theme'),
       html.getAttribute('data-mantine-color-scheme'),
+      html.getAttribute('data-radix-theme'),
+      html.getAttribute('data-kb-theme'),
+      html.getAttribute('data-color-scheme'),
+      html.getAttribute('data-ui-theme'),
     ].filter(Boolean).join(' ');
     if (/\b(dark|night|dim)\b/i.test(themeAttrs)) return true;
 
-    // 3. Common dark-mode CSS classes on <html> or <body>
+    // 3. Common dark-mode CSS classes on <html> or <body> — extended
     const classTokens = [
       html.className,
       body ? body.className : '',
     ].join(' ');
-    if (/\b(dark|dark-theme|theme-dark|theme--dark|night-mode|dim|darkmode)\b/i.test(classTokens)) return true;
+    if (/\b(dark|dark-theme|theme-dark|theme--dark|night-mode|dim|darkmode|sl-theme-dark|vp-dark|tw-dark)\b/i.test(classTokens)) return true;
 
     if (document.querySelector('meta[name="darkreader-lock"]')) return true;
 
@@ -155,6 +526,39 @@
     });
   }
 
+  function isYunoHostSite() {
+    return Boolean(
+      location.pathname.startsWith('/yunohost/admin')
+      || location.pathname.startsWith('/yunohost/sso')
+      || document.querySelector(
+        'link[href*="/yunohost/sso/"], script[src*="/yunohost/sso/"], link[href*="/yunohost/admin/"], script[src*="/yunohost/admin/"], script[data-nuxt-data="nuxt-app"], #__NUXT_DATA__, #__nuxt, #app'
+      )
+      || /YunoHost Admin/i.test(document.title)
+    );
+  }
+
+  function revealPage() {
+    if (hasRevealedPage) return;
+    hasRevealedPage = true;
+    document.documentElement.setAttribute(ROOT_ATTR, 'on');
+  }
+
+  function setSiteProfile() {
+    const root = document.documentElement;
+    if (isYunoHostSite()) {
+      root.setAttribute(SITE_ATTR, 'yunohost');
+      return 'yunohost';
+    }
+
+    if (isAlternativeToSite()) {
+      root.setAttribute(SITE_ATTR, 'alternativeto');
+      return 'alternativeto';
+    }
+
+    root.removeAttribute(SITE_ATTR);
+    return null;
+  }
+
   // Returns 'dark' | 'light' | 'mixed'.
   // 'mixed' = dark shell with significant light content islands (e.g. alternativeto.net).
   // 'dark'  = already-dark page — do nothing.
@@ -163,9 +567,10 @@
     const host = getHost(location.href);
     const siteFix = SITE_FIXES[host];
     if (siteFix?.forceLightMode) {
-      console.log('[Free Dark Mode] Forcing light mode for', host);
       return 'light';
     }
+
+    if (isYunoHostSite()) return 'mixed';
 
     if (hasExplicitDarkHint()) return 'dark';
     if (isAppOrCanvasPage()) return 'dark';
@@ -191,16 +596,26 @@
 
     let darkShellVotes = 0;
     let shellTotal = 0;
+    
+    // Check if background color was set to #111827 by OUR "initializing" state.
+    // If so, it will've poisoned the luminance detection.
+    const isOurInit = document.documentElement.getAttribute(ROOT_ATTR) === 'initializing';
 
     for (const el of shellCandidates) {
-      const bg = effectiveBackground(el);
-      if (!bg) continue;
+      const style = getComputedStyle(el);
+      const bg = parseRgba(style.backgroundColor);
+      if (!bg || bg.a < 0.85) continue;
+      
+      // Ignore background colors matching our own injected "initializing" background
+      if (isOurInit && bg.r === 17 && bg.g === 24 && bg.b === 39) continue;
+      
       shellTotal++;
       if (luminance(bg) < 0.22) darkShellVotes++;
     }
 
     const shellIsDark = shellTotal > 0 && darkShellVotes / shellTotal >= 0.6;
     if (!shellIsDark) return 'light';
+
 
     // Shell is dark. Now check if there are significant light-background content
     // islands. Sample a grid of points across the viewport and count light hits.
@@ -221,9 +636,9 @@
       }
     }
 
-    // If more than 20% of sampled content points are light, treat as mixed.
-    // Lowered threshold to catch more mixed pages.
-    if (validHits > 0 && lightHits / validHits > 0.2) return 'mixed';
+    // If more than 10% of sampled content points are light, treat as mixed.
+    // Lowered threshold from 20% to catch smaller light portals on dark backgrounds.
+    if (validHits > 0 && lightHits / validHits > 0.1) return 'mixed';
 
     return 'dark';
   }
@@ -231,20 +646,24 @@
   function clearMixedSurfaces() {
     document.querySelectorAll(`[${MIXED_SURFACE_ATTR}="on"]`).forEach((el) => {
       el.removeAttribute(MIXED_SURFACE_ATTR);
+      mixedSurfaceCache.delete(el);
+    });
+    document.querySelectorAll(`[${TAG_SURFACE_ATTR}="on"]`).forEach((el) => {
+      el.removeAttribute(TAG_SURFACE_ATTR);
     });
   }
 
   function markMixedSurfaces() {
     clearMixedSurfaces();
 
-    if (document.documentElement.getAttribute(MODE_ATTR) !== 'mixed') return;
+    const mode = document.documentElement.getAttribute(MODE_ATTR);
+    if (mode !== 'mixed' && !isAlternativeToSite()) return;
 
     const host = getHost(location.href);
     const siteFix = SITE_FIXES[host];
     if (siteFix?.mixedSurfaceSelectors?.length) {
       document.querySelectorAll(siteFix.mixedSurfaceSelectors.join(', ')).forEach((el) => {
         if (!(el instanceof HTMLElement)) return;
-        if (el.querySelector('img, video, canvas, picture, iframe')) return;
         el.setAttribute(MIXED_SURFACE_ATTR, 'on');
         const block = el.closest('article, section, li, div');
         if (block instanceof HTMLElement) {
@@ -256,26 +675,47 @@
     const viewportArea = window.innerWidth * window.innerHeight;
     if (!viewportArea) return;
 
-    const candidates = Array.from(document.querySelectorAll('main, article, section, div, li'));
+    const candidates = Array.from(document.querySelectorAll('main, article, section, div, li, form, aside, dialog, a, button, span'));
+    const opacityThreshold = (currentTheme.detectOpacity ?? DEFAULT_THEME.detectOpacity) / 100;
+    const lightnessThreshold = (currentTheme.detectLightness ?? DEFAULT_THEME.detectLightness) / 100;
     for (const el of candidates) {
       if (!(el instanceof HTMLElement)) continue;
       if (el === document.body || el === document.documentElement) continue;
 
       const rect = el.getBoundingClientRect();
       const area = rect.width * rect.height;
-      if (rect.width < window.innerWidth * 0.28) continue;
-      if (rect.height < 120) continue;
-      if (area < viewportArea * 0.025) continue;
+      const tagName = el.tagName.toLowerCase();
+      const isFormLike = tagName === 'form' || tagName === 'dialog';
+      const isInteractiveSurface = tagName === 'a' || tagName === 'button';
+      const isTagLike = currentTheme.detectTags && isPotentialTagElement(el);
+
+      if (rect.width < window.innerWidth * (isTagLike ? 0.02 : isInteractiveSurface ? 0.08 : isFormLike ? 0.18 : 0.22)) continue;
+      if (rect.height < (isTagLike ? 22 : isInteractiveSurface ? 36 : isFormLike ? 72 : 96)) continue;
+      if (area < viewportArea * (isTagLike ? 0.0005 : isInteractiveSurface ? 0.0025 : isFormLike ? 0.008 : 0.015)) continue;
 
       const style = getComputedStyle(el);
       const bg = parseRgba(style.backgroundColor);
-      if (!bg || bg.a < 0.6) continue;
-      if (luminance(bg) < 0.58) continue;
+      if (!bg || bg.a < opacityThreshold) continue;
+      const lum = luminance(bg);
+      if (lum < lightnessThreshold) continue;
 
       const textLength = (el.innerText || '').trim().length;
-      if (textLength < 20 && el.children.length < 2) continue;
+      if (textLength < (isTagLike || isInteractiveSurface ? 2 : 8) && el.children.length < 1) continue;
+
+      // Skip if this element was already processed with the same luminance bucket
+      // (rounded to 2dp) to avoid redundant attribute writes on MutationObserver bursts.
+      const lumKey = `${Math.round(lum * 100)}:${isTagLike ? 1 : 0}`;
+      if (mixedSurfaceCache.get(el) === lumKey) continue;
+      mixedSurfaceCache.set(el, lumKey);
 
       el.setAttribute(MIXED_SURFACE_ATTR, 'on');
+      if (isTagLike) el.setAttribute(TAG_SURFACE_ATTR, 'on');
+
+      const container = el.closest('article, section, li, div, form, aside, dialog, a, button, span');
+      if (container instanceof HTMLElement) {
+        container.setAttribute(MIXED_SURFACE_ATTR, 'on');
+        if (isTagLike) container.setAttribute(TAG_SURFACE_ATTR, 'on');
+      }
     }
   }
 
@@ -297,20 +737,28 @@
   //             technique that flips dark→light and light→dark simultaneously.
   //             Media elements re-inverted back. Tradeoff: brand colors shift.
 
+  /**
+   * CSP-safe style injection.
+   * On sites with strict 'style-src', inline <style> tags are blocked even if added by a content script.
+   * We use CSSStyleSheet.replaceSync() which is generally exempt from CSP 'style-src'
+   * because it doesn't involve "unsafe-inline" parsing of a string into the DOM.
+   */
+  let adoptedSheet = null;
   function injectStyles() {
-    if (document.getElementById(STYLE_ID)) return;
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent = `
+    if (document.getElementById(STYLE_ID) || adoptedSheet) return;
+
+    const cssText = `
       /* ── Anti-FOUC: Hide page until mode is determined ─────────────────── */
       html[${ROOT_ATTR}="initializing"] {
-        opacity: 0 !important;
-        transition: opacity 0.1s ease-out !important;
+        background: #111827 !important;
+        color: #e5e7eb !important;
+      }
+      html[${ROOT_ATTR}="initializing"] body {
+        visibility: hidden !important;
       }
       
       html[${ROOT_ATTR}="on"] {
-        opacity: 1 !important;
-        transition: filter 0.3s ease-out, opacity 0.3s ease-out !important;
+        transition: none !important;
       }
       
       /* ── Root ──────────────────────────────────────────────────────────── */
@@ -321,6 +769,14 @@
       }
 
       html[${ROOT_ATTR}="on"][${MODE_ATTR}="mixed"] {
+        color-scheme: dark !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="yunohost"] {
+        color-scheme: dark !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="alternativeto"] {
         color-scheme: dark !important;
       }
 
@@ -367,15 +823,16 @@
         background-color: var(--ldr-bg, #111827) !important;
         color: var(--ldr-fg, #e5e7eb) !important;
         border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
+        box-shadow: none !important;
       }
 
-      html[${ROOT_ATTR}="on"][${MODE_ATTR}="mixed"] [${MIXED_SURFACE_ATTR}="on"] :is(div, article, section, header, footer, aside, ul, ol, li, dl, form) {
+      html[${ROOT_ATTR}="on"][${MODE_ATTR}="mixed"] [${MIXED_SURFACE_ATTR}="on"] :is(div, article, section, header, footer, aside, ul, ol, li, dl, form, dialog, p, span, label, strong, em, small, a, button) {
         color: inherit !important;
         border-color: inherit !important;
       }
 
-      html[${ROOT_ATTR}="on"][${MODE_ATTR}="mixed"] [${MIXED_SURFACE_ATTR}="on"] :is(div, article, section, header, footer, aside, ul, ol, li, dl, form):not(img):not(video):not(canvas):not(svg):not(picture):not(iframe) {
-        background-color: transparent !important;
+      html[${ROOT_ATTR}="on"][${MODE_ATTR}="mixed"] [${MIXED_SURFACE_ATTR}="on"]:is(article, section, div, li, form, aside, dialog, a, button) {
+        background-image: none !important;
       }
 
       html[${ROOT_ATTR}="on"][${MODE_ATTR}="mixed"] [${MIXED_SURFACE_ATTR}="on"] :is(h1, h2, h3, h4, h5, h6, p, span, strong, em, li, dt, dd, small, label, button) {
@@ -393,11 +850,124 @@
         color: var(--ldr-link, #93c5fd) !important;
       }
 
+      html[${ROOT_ATTR}="on"][${MODE_ATTR}="mixed"] [${MIXED_SURFACE_ATTR}="on"] button,
+      html[${ROOT_ATTR}="on"][${MODE_ATTR}="mixed"] button[${MIXED_SURFACE_ATTR}="on"],
+      html[${ROOT_ATTR}="on"][${MODE_ATTR}="mixed"] a[${MIXED_SURFACE_ATTR}="on"] {
+        background-color: var(--ldr-surface, rgba(255, 255, 255, 0.06)) !important;
+        color: var(--ldr-fg, #e5e7eb) !important;
+        border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${MODE_ATTR}="mixed"] [${TAG_SURFACE_ATTR}="on"] {
+        background-color: var(--ldr-tag-bg, rgba(147, 197, 253, 0.18)) !important;
+        color: var(--ldr-tag-fg, #dbeafe) !important;
+        border-color: var(--ldr-tag-border, rgba(147, 197, 253, 0.34)) !important;
+        background-image: none !important;
+        box-shadow: none !important;
+      }
+
       html[${ROOT_ATTR}="on"][${MODE_ATTR}="mixed"] [${MIXED_SURFACE_ATTR}="on"] :is(input:not([type="color"]):not([type="range"]):not([type="checkbox"]):not([type="radio"]), textarea, select) {
         background-color: var(--ldr-surface, rgba(255, 255, 255, 0.06)) !important;
         color: var(--ldr-fg, #e5e7eb) !important;
         border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
         color-scheme: dark !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="yunohost"] #__nuxt,
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="yunohost"] body,
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="yunohost"] main {
+        background-color: transparent !important;
+        color: var(--ldr-fg, #e5e7eb) !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="yunohost"] :is(.bg-base-100, .bg-base-200, .bg-base-300, .card, .alert, .menu, .join, .join-item, .input, .select, .mockup-browser .input) {
+        background-color: var(--ldr-surface, rgba(255, 255, 255, 0.06)) !important;
+        color: var(--ldr-fg, #e5e7eb) !important;
+        border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
+        background-image: none !important;
+        box-shadow: none !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="yunohost"] :is(.btn, .btn-outline, .btn-ghost):not(.btn-primary):not(.btn-success):not(.btn-info):not(.btn-error) {
+        background-color: var(--ldr-surface, rgba(255, 255, 255, 0.06)) !important;
+        color: var(--ldr-fg, #e5e7eb) !important;
+        border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
+        box-shadow: none !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="yunohost"] :is(.btn-primary, .btn-success, .btn-info, .btn-error) {
+        color: #fff !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="yunohost"] :is(.input, .select, .input-bordered, .select-bordered) {
+        background-color: var(--ldr-surface, rgba(255, 255, 255, 0.06)) !important;
+        color: var(--ldr-fg, #e5e7eb) !important;
+        border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="yunohost"] :is(.text-base-content, .label, .footer, .menu, .card, .alert, .link, .link-hover, h1, h2, h3, h4, h5, h6, p, span, small, strong) {
+        color: var(--ldr-fg, #e5e7eb) !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="yunohost"] a:not(.btn) {
+        color: var(--ldr-link, #93c5fd) !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="yunohost"] :is(.border-base-300, .card-bordered, .border, .border-t) {
+        border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="alternativeto"] :is(main, article, section, aside, form, li, div[class], article[class], section[class]) {
+        border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="alternativeto"] :is(article, section, aside, form, li, div):where(:not(img):not(video):not(canvas):not(svg)):has(> h1, > h2, > h3, > p, > ul, > ol),
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="alternativeto"] :is(main > div, article > div, section > div):where(:not(img):not(video):not(canvas):not(svg)) {
+        background-color: var(--ldr-surface, rgba(255, 255, 255, 0.06)) !important;
+        color: var(--ldr-fg, #e5e7eb) !important;
+        border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
+        background-image: none !important;
+        box-shadow: none !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="alternativeto"] :is(h1, h2, h3, h4, h5, h6, p, span, li, dt, dd, small, strong, label) {
+        color: inherit !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="alternativeto"] :is(input:not([type="color"]):not([type="range"]):not([type="checkbox"]):not([type="radio"]), textarea, select, button, a[role="button"]) {
+        background-color: var(--ldr-surface, rgba(255, 255, 255, 0.06)) !important;
+        color: var(--ldr-fg, #e5e7eb) !important;
+        border-color: var(--ldr-border, rgba(255, 255, 255, 0.14)) !important;
+      }
+
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="alternativeto"] [${TAG_SURFACE_ATTR}="on"],
+      html[${ROOT_ATTR}="on"][${SITE_ATTR}="alternativeto"] :is(
+        a[href*="/browse/all/?tag="],
+        a[href*="/platform/"],
+        a[href*="/category/"],
+        a[href*="/license/"],
+        a[class*="tag" i],
+        a[class*="badge" i],
+        a[class*="chip" i],
+        a[class*="pill" i],
+        span[class*="tag" i],
+        span[class*="badge" i],
+        span[class*="chip" i],
+        span[class*="pill" i],
+        div[class*="tag" i],
+        div[class*="badge" i],
+        div[class*="chip" i],
+        div[class*="pill" i],
+        li[class*="tag" i],
+        li[class*="badge" i],
+        li[class*="chip" i],
+        li[class*="pill" i]
+      ) {
+        background-color: var(--ldr-tag-bg, rgba(147, 197, 253, 0.18)) !important;
+        color: var(--ldr-tag-fg, #dbeafe) !important;
+        border-color: var(--ldr-tag-border, rgba(147, 197, 253, 0.34)) !important;
+        background-image: none !important;
+        box-shadow: none !important;
       }
 
       /* Re-invert media so photos/video look natural after the page invert.  */
@@ -464,11 +1034,30 @@
         border-radius: 4px;
       }
     `;
+
+    // Attempt adoptedStyleSheets first (CSP-safe)
+    if (document.adoptedStyleSheets) {
+      try {
+        adoptedSheet = new CSSStyleSheet();
+        adoptedSheet.replaceSync(cssText);
+        document.adoptedStyleSheets = [...document.adoptedStyleSheets, adoptedSheet];
+        return;
+      } catch (e) {
+        console.warn('[Free Dark Mode] Failed to adopt stylesheet, falling back to <style> injection', e);
+      }
+    }
+
+    // Fallback to traditional <style> element
+    const style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = cssText;
     document.documentElement.appendChild(style);
   }
 
+
   function setTheme(theme) {
     const t = { ...DEFAULT_THEME, ...(theme || {}) };
+    currentTheme = t;
     const root = document.documentElement;
     root.style.setProperty('--ldr-brightness', `${t.brightness}%`);
     root.style.setProperty('--ldr-contrast', `${t.contrast}%`);
@@ -480,15 +1069,33 @@
     root.style.setProperty('--ldr-link', t.link);
     root.style.setProperty('--ldr-border', t.border);
     root.style.setProperty('--ldr-surface', t.surface);
+    root.style.setProperty('--ldr-tag-bg', t.tagBg);
+    root.style.setProperty('--ldr-tag-fg', t.tagFg);
+    root.style.setProperty('--ldr-tag-border', t.tagBorder);
   }
 
-  function setMode() {
-    const mode = detectPageMode();
-    console.log('[Free Dark Mode] Detected mode:', mode, 'for', location.hostname);
-    document.documentElement.setAttribute(MODE_ATTR, mode);
-    markMixedSurfaces();
-    applyDirectDarkening();
-    console.log('[Free Dark Mode] Marked', document.querySelectorAll(`[${MIXED_SURFACE_ATTR}="on"]`).length, 'mixed surfaces');
+  function setMode(isInitial = false) {
+    const currentMode = document.documentElement.getAttribute(MODE_ATTR);
+    const newMode = detectPageMode();
+
+    if (!isInitial && newMode === 'dark' && currentMode && currentMode !== 'dark') {
+      const strongDarkSignal = hasExplicitDarkHint() || isAppOrCanvasPage();
+      if (!strongDarkSignal) return;
+    }
+    
+    // Only update and log if the mode actually changed, or if it's the very first detection.
+    // This prevents flickering and redundant console noise.
+    if (!isInitial && currentMode === newMode) return;
+
+    if (window === window.top) {
+      console.log('[Free Dark Mode] Detected mode:', newMode, 'for', location.hostname || location.href);
+    }
+    document.documentElement.setAttribute(MODE_ATTR, newMode);
+    performRestylePass();
+    
+    if (newMode === 'mixed' && window === window.top) {
+      console.log('[Free Dark Mode] Marked', document.querySelectorAll(`[${MIXED_SURFACE_ATTR}="on"]`).length, 'mixed surfaces');
+    }
   }
 
   // Defer mode detection until styles are computed. At document_start the DOM
@@ -497,59 +1104,86 @@
   // after DOMContentLoaded + one rAF so computed backgrounds are available.
   // A second pass fires 800ms later for SPAs / lazy-painted pages.
   function scheduleSetMode() {
-    const run = () => setMode();
+    clearScheduledModeChecks();
+
+    const runInitialPass = () => {
+      setMode(true);
+      revealPage();
+    };
 
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => {
-        run();
-        setTimeout(() => setMode(), 800);
-        setTimeout(() => setMode(), 2000);
+        requestAnimationFrame(runInitialPass);
+        modeTimerIds.push(setTimeout(() => setMode(), 800));
+        modeTimerIds.push(setTimeout(() => setMode(), 2500));
+        // Extra pass for extremely lazy SPAs that finish rendering after 2.5s
+        modeTimerIds.push(setTimeout(() => setMode(), 4500));
       }, { once: true });
     } else {
-      run();
-      setTimeout(() => setMode(), 800);
-      setTimeout(() => setMode(), 2000);
+      runInitialPass();
+      modeTimerIds.push(setTimeout(() => setMode(), 800));
+      modeTimerIds.push(setTimeout(() => setMode(), 2500));
+      modeTimerIds.push(setTimeout(() => setMode(), 4500));
     }
   }
 
+
   function observePageChanges() {
-    const observer = new MutationObserver(() => {
-      const mode = document.documentElement.getAttribute(MODE_ATTR);
-      if (mode === 'mixed') {
-        markMixedSurfaces();
-      }
+    if (pageObserver) {
+      pageObserver.disconnect();
+    }
+
+    pageObserver = new MutationObserver(() => {
+      if (isApplyingInternalStyles) return;
+      queueRestylePass();
     });
 
     const target = document.body || document.documentElement;
-    observer.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
+    pageObserver.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
   }
 
   function setEnabled(enabled) {
     injectStyles();
     const root = document.documentElement;
+    hasRevealedPage = false;
+    setSiteProfile();
+
     if (!enabled) {
       root.setAttribute(ROOT_ATTR, 'off');
       return;
     }
+    
+    // Set to initializing BEFORE any async calls or heavy logic
     root.setAttribute(ROOT_ATTR, 'initializing');
-    const mode = detectPageMode();
-    root.setAttribute(MODE_ATTR, mode);
-    requestAnimationFrame(() => {
-      root.setAttribute(ROOT_ATTR, 'on');
-    });
+    
+    root.setAttribute(MODE_ATTR, isYunoHostSite() ? 'mixed' : 'light');
   }
 
   async function sync() {
-    const { enabled, siteOverrides, theme } = await chrome.runtime.sendMessage({ type: 'get-state' });
+    // Immediate early-injection before awaiting background state
+    // We don't know yet if enabled=true, so we can't set ROOT_ATTR="initializing" yet.
+    // However, we can inject the CSS which will work once the attribute IS set.
+    injectStyles();
+    setSiteProfile();
+
+    const root = document.documentElement;
+    if (!root.hasAttribute(ROOT_ATTR)) {
+      root.setAttribute(ROOT_ATTR, 'initializing');
+      root.setAttribute(MODE_ATTR, isYunoHostSite() ? 'mixed' : 'light');
+    }
+
+    const { enabled, siteOverrides, elementOverrides, theme } = await chrome.runtime.sendMessage({ type: 'get-state' });
     const host = getHost(location.href);
     const siteEnabled = Object.prototype.hasOwnProperty.call(siteOverrides || {}, host)
       ? siteOverrides[host]
       : enabled;
+    siteElementOverrides = { ...(elementOverrides?.[host] || {}) };
     setTheme(theme);
     if (siteEnabled) {
       setEnabled(true);
       scheduleSetMode();
       observePageChanges();
+      applyElementOverrides();
     } else {
       document.documentElement.setAttribute(ROOT_ATTR, 'off');
     }
@@ -557,7 +1191,58 @@
 
   sync();
 
+  // React to storage changes for immediate updates.
+  // - Quick path: if only `theme` changed, apply it directly via `setTheme()`.
+  // - Otherwise debounce a full `sync()` so content scripts pick up new state.
+  const STORAGE_SYNC_DEBOUNCE = 150;
+  let storageSyncTimer = null;
+
+  if (chrome?.storage?.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+
+      try {
+        const keys = Object.keys(changes || {});
+
+        // Fast path: only theme changed -> update CSS variables immediately
+        if (keys.length === 1 && changes.theme) {
+          const newTheme = changes.theme.newValue || DEFAULT_THEME;
+          setTheme(newTheme);
+          return;
+        }
+
+        // Debounce heavier work (overrides, enabled, siteOverrides)
+        if (storageSyncTimer) clearTimeout(storageSyncTimer);
+        storageSyncTimer = setTimeout(() => {
+          try {
+            sync();
+          } catch (e) {
+            // swallow to avoid noisy console spam in pages
+          }
+          storageSyncTimer = null;
+        }, STORAGE_SYNC_DEBOUNCE);
+      } catch (e) {
+        // defensive: do a full sync if anything goes wrong
+        try { sync(); } catch (err) {}
+      }
+    });
+  }
+
   chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === 'ping-free-dark-mode') {
+      return true;
+    }
+
+    if (message?.type === 'start-element-picker') {
+      startPickerMode();
+      return;
+    }
+
+    if (message?.type === 'refresh-element-overrides') {
+      refreshElementOverrides();
+      return;
+    }
+
     if (message?.type === 'refresh-dark-mode') {
       sync();
     }

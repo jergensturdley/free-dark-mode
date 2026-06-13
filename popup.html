@@ -13,8 +13,49 @@
         <input id="enabled" type="checkbox" />
       </label>
       <button id="toggle-site" type="button">Toggle current site</button>
+      <button id="pick-element" type="button">Pick Element On Page</button>
+
+      <section class="picker-panel">
+        <h2>Element Editor</h2>
+        <p id="picker-status" class="status">No element selected yet.</p>
+        <div id="selection-details" class="selection-details" hidden>
+          <div class="detail-row">
+            <span class="detail-label">Element</span>
+            <span id="selection-label" class="detail-value"></span>
+          </div>
+          <div class="detail-row detail-column">
+            <span class="detail-label">Selector</span>
+            <span id="selection-selector" class="detail-code"></span>
+          </div>
+          <label class="field-row field-row-stacked">
+            <span>Style Preset</span>
+            <select id="picker-preset">
+              <option value="custom">Custom Colors</option>
+              <option value="surface">Use Theme Surface</option>
+              <option value="tag">Use Theme Tag Palette</option>
+              <option value="auto">Reset To Auto-Detect</option>
+            </select>
+          </label>
+          <label class="field-row">
+            <span>Background</span>
+            <input id="picker-bg" type="color" value="#1a1f2e" />
+          </label>
+          <label class="field-row">
+            <span>Text</span>
+            <input id="picker-fg" type="color" value="#e5e7eb" />
+          </label>
+          <label class="field-row">
+            <span>Border</span>
+            <input id="picker-border" type="color" value="#93c5fd" />
+          </label>
+          <div class="preview-swatch" id="picker-preview">Sample element</div>
+          <button id="apply-element-style" type="button">Apply To This Site</button>
+          <button id="clear-element-style" type="button" class="secondary">Clear This Override</button>
+        </div>
+      </section>
+
       <a class="link" href="options.html" target="_blank" rel="noreferrer">Open settings</a>
-      <p class="note">No telemetry. No accounts. Everything stays local.</p>
+      <p class="note">Pick closes the popup. Click an element on the page, then reopen the popup to edit it. No telemetry. Everything stays local.</p>
     </main>
     <script src="popup.js"></script>
   </body>

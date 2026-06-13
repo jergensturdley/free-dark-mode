@@ -11,9 +11,90 @@ const DEFAULTS = {
     fg: '#e5e7eb',
     link: '#93c5fd',
     border: 'rgba(255, 255, 255, 0.14)',
-    surface: 'rgba(255, 255, 255, 0.06)'
+    surface: 'rgba(255, 255, 255, 0.06)',
+    tagBg: 'rgba(147, 197, 253, 0.18)',
+    tagFg: '#dbeafe',
+    tagBorder: 'rgba(147, 197, 253, 0.34)',
+    detectLightness: 58,
+    detectOpacity: 60,
+    detectTags: true
   }
 };
+
+const PRESET_THEMES = {
+  slate: {
+    bg: '#111827',
+    fg: '#e5e7eb',
+    link: '#93c5fd',
+    border: 'rgba(255, 255, 255, 0.14)',
+    surface: 'rgba(255, 255, 255, 0.06)',
+    tagBg: 'rgba(147, 197, 253, 0.18)',
+    tagFg: '#dbeafe',
+    tagBorder: 'rgba(147, 197, 253, 0.34)'
+  },
+  graphite: {
+    bg: '#101214',
+    fg: '#f3f4f6',
+    link: '#a7f3d0',
+    border: 'rgba(255, 255, 255, 0.16)',
+    surface: 'rgba(255, 255, 255, 0.08)',
+    tagBg: 'rgba(255, 255, 255, 0.1)',
+    tagFg: '#f9fafb',
+    tagBorder: 'rgba(255, 255, 255, 0.22)'
+  },
+  forest: {
+    bg: '#0b1b16',
+    fg: '#e5fff4',
+    link: '#86efac',
+    border: 'rgba(134, 239, 172, 0.24)',
+    surface: 'rgba(110, 231, 183, 0.08)',
+    tagBg: 'rgba(52, 211, 153, 0.18)',
+    tagFg: '#d1fae5',
+    tagBorder: 'rgba(52, 211, 153, 0.34)'
+  },
+  amber: {
+    bg: '#1b1408',
+    fg: '#fff7ed',
+    link: '#fdba74',
+    border: 'rgba(251, 191, 36, 0.24)',
+    surface: 'rgba(251, 191, 36, 0.08)',
+    tagBg: 'rgba(245, 158, 11, 0.2)',
+    tagFg: '#fffbeb',
+    tagBorder: 'rgba(245, 158, 11, 0.36)'
+  },
+  contrast: {
+    bg: '#05070a',
+    fg: '#ffffff',
+    link: '#7dd3fc',
+    border: 'rgba(255, 255, 255, 0.28)',
+    surface: 'rgba(255, 255, 255, 0.1)',
+    tagBg: 'rgba(125, 211, 252, 0.24)',
+    tagFg: '#ffffff',
+    tagBorder: 'rgba(125, 211, 252, 0.42)'
+  }
+};
+
+const SIMPLE_CONTROLS = [
+  ['brightness', 'brightness', 'range'],
+  ['contrast', 'contrast', 'range'],
+  ['sepia', 'sepia', 'range'],
+  ['grayscale', 'grayscale', 'range'],
+  ['hue', 'hue', 'range'],
+  ['bg', 'bg', 'color'],
+  ['fg', 'fg', 'color'],
+  ['link', 'link', 'color'],
+  ['tag-fg', 'tagFg', 'color'],
+  ['detect-lightness', 'detectLightness', 'range'],
+  ['detect-opacity', 'detectOpacity', 'range'],
+  ['detect-tags', 'detectTags', 'checkbox']
+];
+
+const RGBA_CONTROLS = [
+  ['border', 'border'],
+  ['surface', 'surface'],
+  ['tag-bg', 'tagBg'],
+  ['tag-border', 'tagBorder']
+];
 
 // Draft theme to hold in-memory state during rapid edits
 let draftTheme = { ...DEFAULTS.theme };
@@ -34,6 +115,22 @@ function hexToRgb(hex) {
     g: (bigint >> 8) & 255,
     b: bigint & 255
   };
+}
+
+function parseRgbaValue(value) {
+  const match = String(value).match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/i);
+  if (!match) return null;
+  return {
+    r: parseInt(match[1], 10),
+    g: parseInt(match[2], 10),
+    b: parseInt(match[3], 10),
+    a: match[4] == null ? 1 : parseFloat(match[4])
+  };
+}
+
+function setRangeValueLabel(id, value) {
+  const valueEl = el(`${id}-value`);
+  if (valueEl) valueEl.textContent = `${value}%`;
 }
 
 // Extract hostname from a URL or return the string if it's already a hostname
@@ -171,52 +268,98 @@ async function renderSites() {
 function updateBorderSurfaceTheme(type) {
   const colorInput = el(`${type}-color`);
   const opacityInput = el(`${type}-opacity`);
+  const themeKey = type.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase());
   
   if (colorInput && opacityInput) {
     const hex = colorInput.value;
     const opacity = parseInt(opacityInput.value, 10) / 100;
     const rgb = hexToRgb(hex);
-    draftTheme[type] = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${opacity})`;
+    draftTheme[themeKey] = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${opacity})`;
   }
   
+  updatePresetSelect();
   applyThemeToPreview(draftTheme);
   saveThemeDebounced();
 }
 
-function wireThemeControls() {
-  const standardKeys = ['brightness', 'contrast', 'sepia', 'grayscale', 'hue', 'bg', 'fg', 'link'];
-  for (const key of standardKeys) {
-    const input = el(key);
+function syncThemeInputs() {
+  for (const [id, themeKey, type] of SIMPLE_CONTROLS) {
+    const input = el(id);
     if (!input) continue;
-    input.value = String(draftTheme[key] !== undefined ? draftTheme[key] : DEFAULTS.theme[key]);
-    input.addEventListener('input', () => {
-      draftTheme[key] = input.type === 'range' ? Number(input.value) : input.value;
+    if (type === 'checkbox') {
+      input.checked = !!draftTheme[themeKey];
+      continue;
+    }
+    input.value = String(draftTheme[themeKey]);
+    if (type === 'range') setRangeValueLabel(id, input.value);
+  }
+
+  for (const [idPrefix, themeKey] of RGBA_CONTROLS) {
+    const colorInput = el(`${idPrefix}-color`);
+    const opacityInput = el(`${idPrefix}-opacity`);
+    const opacityValue = el(`${idPrefix}-opacity-value`);
+    if (!colorInput || !opacityInput || !opacityValue) continue;
+    const parsed = parseRgbaValue(draftTheme[themeKey] || DEFAULTS.theme[themeKey]);
+    if (!parsed) continue;
+    colorInput.value = rgbToHex(parsed.r, parsed.g, parsed.b);
+    const opacity = Math.round(parsed.a * 100);
+    opacityInput.value = String(opacity);
+    opacityValue.textContent = `${opacity}%`;
+  }
+}
+
+function detectPreset(theme) {
+  for (const [name, preset] of Object.entries(PRESET_THEMES)) {
+    if (Object.entries(preset).every(([key, value]) => theme[key] === value)) {
+      return name;
+    }
+  }
+  return 'custom';
+}
+
+function updatePresetSelect() {
+  const presetSelect = el('palette-preset');
+  if (presetSelect) presetSelect.value = detectPreset(draftTheme);
+}
+
+function wireThemeControls() {
+  for (const [id, themeKey, type] of SIMPLE_CONTROLS) {
+    const input = el(id);
+    if (!input) continue;
+    const eventName = type === 'checkbox' ? 'change' : 'input';
+    input.addEventListener(eventName, () => {
+      draftTheme[themeKey] = type === 'checkbox' ? input.checked : input.type === 'range' ? Number(input.value) : input.value;
+      if (type === 'range') setRangeValueLabel(id, input.value);
+      updatePresetSelect();
       applyThemeToPreview(draftTheme);
       saveThemeDebounced();
     });
   }
   
-  for (const type of ['border', 'surface']) {
-    const colorInput = el(`${type}-color`);
-    const opacityInput = el(`${type}-opacity`);
-    const opacityValue = el(`${type}-opacity-value`);
-    
+  for (const [idPrefix] of RGBA_CONTROLS) {
+    const colorInput = el(`${idPrefix}-color`);
+    const opacityInput = el(`${idPrefix}-opacity`);
+    const opacityValue = el(`${idPrefix}-opacity-value`);
+
     if (colorInput && opacityInput && opacityValue) {
-      const themeVal = draftTheme[type] || DEFAULTS.theme[type];
-      const match = themeVal.match(/rgba?\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)/);
-      if (match) {
-        colorInput.value = rgbToHex(parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10));
-        const opacity = Math.round(parseFloat(match[4]) * 100);
-        opacityInput.value = String(opacity);
-        opacityValue.textContent = `${opacity}%`;
-      }
       
-      colorInput.addEventListener('input', () => updateBorderSurfaceTheme(type));
+      colorInput.addEventListener('input', () => updateBorderSurfaceTheme(idPrefix));
       opacityInput.addEventListener('input', () => {
         opacityValue.textContent = `${opacityInput.value}%`;
-        updateBorderSurfaceTheme(type);
+        updateBorderSurfaceTheme(idPrefix);
       });
     }
+  }
+
+  const presetSelect = el('palette-preset');
+  if (presetSelect) {
+    presetSelect.addEventListener('change', () => {
+      if (presetSelect.value === 'custom') return;
+      draftTheme = { ...draftTheme, ...PRESET_THEMES[presetSelect.value] };
+      syncThemeInputs();
+      applyThemeToPreview(draftTheme);
+      saveThemeDebounced();
+    });
   }
 }
 
@@ -237,6 +380,9 @@ function applyThemeToPreview(themePartial) {
   previewPane.style.setProperty('--ldr-link', theme.link);
   previewPane.style.setProperty('--ldr-border', theme.border);
   previewPane.style.setProperty('--ldr-surface', theme.surface);
+  previewPane.style.setProperty('--ldr-tag-bg', theme.tagBg);
+  previewPane.style.setProperty('--ldr-tag-fg', theme.tagFg);
+  previewPane.style.setProperty('--ldr-tag-border', theme.tagBorder);
   
   previewPane.setAttribute('data-free-dark-mode', 'on');
   previewPane.setAttribute('data-free-dark-mode-mode', 'light');
@@ -279,6 +425,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   wireThemeControls();
+  syncThemeInputs();
+  updatePresetSelect();
   applyThemeToPreview(draftTheme);
   await renderSites();
 });

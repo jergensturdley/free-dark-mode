@@ -1,6 +1,8 @@
 const DEFAULTS = {
   enabled: true,
   siteOverrides: {},
+  elementOverrides: {},
+  pickerSelection: null,
   theme: {
     brightness: 92,
     contrast: 102,
@@ -11,7 +13,13 @@ const DEFAULTS = {
     fg: '#e5e7eb',
     link: '#93c5fd',
     border: 'rgba(255, 255, 255, 0.14)',
-    surface: 'rgba(255, 255, 255, 0.06)'
+    surface: 'rgba(255, 255, 255, 0.06)',
+    tagBg: 'rgba(147, 197, 253, 0.18)',
+    tagFg: '#dbeafe',
+    tagBorder: 'rgba(147, 197, 253, 0.34)',
+    detectLightness: 58,
+    detectOpacity: 60,
+    detectTags: true
   }
 };
 
@@ -56,6 +64,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const next = { ...(siteOverrides || {}) };
       delete next[message.hostname];
       await chrome.storage.local.set({ siteOverrides: next });
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (message?.type === 'set-picker-selection') {
+    chrome.storage.local.set({ pickerSelection: message.selection || null }).then(() => {
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (message?.type === 'save-element-override') {
+    chrome.storage.local.get(DEFAULTS).then(async ({ elementOverrides, pickerSelection }) => {
+      const selection = message.selection || pickerSelection;
+      if (!selection?.host || !selection?.selector) {
+        sendResponse({ ok: false, error: 'No selection available' });
+        return;
+      }
+
+      const next = { ...(elementOverrides || {}) };
+      const hostOverrides = { ...(next[selection.host] || {}) };
+      hostOverrides[selection.selector] = {
+        bg: message.colors?.bg,
+        fg: message.colors?.fg,
+        border: message.colors?.border,
+        label: selection.label,
+      };
+      next[selection.host] = hostOverrides;
+
+      await chrome.storage.local.set({ elementOverrides: next, pickerSelection: selection });
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (message?.type === 'clear-element-override') {
+    chrome.storage.local.get(DEFAULTS).then(async ({ elementOverrides, pickerSelection }) => {
+      const selection = message.selection || pickerSelection;
+      if (!selection?.host || !selection?.selector) {
+        sendResponse({ ok: false, error: 'No selection available' });
+        return;
+      }
+
+      const next = { ...(elementOverrides || {}) };
+      const hostOverrides = { ...(next[selection.host] || {}) };
+      delete hostOverrides[selection.selector];
+
+      if (Object.keys(hostOverrides).length) {
+        next[selection.host] = hostOverrides;
+      } else {
+        delete next[selection.host];
+      }
+
+      await chrome.storage.local.set({ elementOverrides: next, pickerSelection: selection });
       sendResponse({ ok: true });
     });
     return true;

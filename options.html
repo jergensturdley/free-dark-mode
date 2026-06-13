@@ -28,6 +28,16 @@
 
       <section>
         <h2>Color Customization</h2>
+        <label>Palette preset
+          <select id="palette-preset">
+            <option value="custom">Custom</option>
+            <option value="slate">Slate Blue</option>
+            <option value="graphite">Graphite</option>
+            <option value="forest">Forest</option>
+            <option value="amber">Warm Amber</option>
+            <option value="contrast">High Contrast</option>
+          </select>
+        </label>
         <label>Background Color <input id="bg" type="color" value="#111827" /></label>
         <label>Foreground Color <input id="fg" type="color" value="#e5e7eb" /></label>
         <label>Link Color <input id="link" type="color" value="#93c5fd" /></label>
@@ -49,6 +59,52 @@
           </div>
           <small style="color: #888;">Adjust color and opacity</small>
         </div>
+        <div style="margin-top: 12px;">
+          <label>Tag or Chip Background</label>
+          <div style="display: flex; gap: 12px; align-items: center;">
+            <input id="tag-bg-color" type="color" value="#93c5fd" />
+            <input id="tag-bg-opacity" type="range" min="0" max="100" value="18" />
+            <span id="tag-bg-opacity-value">18%</span>
+          </div>
+          <small style="color: #888;">Used for badges, tags, chips and platform pills</small>
+        </div>
+        <div style="margin-top: 12px;">
+          <label>Tag or Chip Text <input id="tag-fg" type="color" value="#dbeafe" /></label>
+        </div>
+        <div style="margin-top: 12px;">
+          <label>Tag or Chip Border</label>
+          <div style="display: flex; gap: 12px; align-items: center;">
+            <input id="tag-border-color" type="color" value="#93c5fd" />
+            <input id="tag-border-opacity" type="range" min="0" max="100" value="34" />
+            <span id="tag-border-opacity-value">34%</span>
+          </div>
+          <small style="color: #888;">Helpful when chip elements stay too bright on mixed pages</small>
+        </div>
+      </section>
+
+      <section>
+        <h2>Detection Troubleshooting</h2>
+        <label>Light surface sensitivity
+          <div class="range-row">
+            <input id="detect-lightness" type="range" min="45" max="80" value="58" />
+            <span id="detect-lightness-value">58%</span>
+          </div>
+        </label>
+        <small class="help-text">Higher values target only very bright surfaces. Lower values darken more neutral cards.</small>
+
+        <label>Background opacity requirement
+          <div class="range-row">
+            <input id="detect-opacity" type="range" min="35" max="95" value="60" />
+            <span id="detect-opacity-value">60%</span>
+          </div>
+        </label>
+        <small class="help-text">Lower this when tags or chips use translucent backgrounds that are being missed.</small>
+
+        <label class="checkbox-row">
+          Detect small tags and badges automatically
+          <input id="detect-tags" type="checkbox" checked />
+        </label>
+        <small class="help-text">Useful for platform pills, license tags, category badges and similar compact elements.</small>
       </section>
 
       <section>
@@ -58,6 +114,11 @@
             <h3>Preview</h3>
             <p>This is a sample text to preview how your theme looks.</p>
             <a href="#" class="preview-link">Sample Link</a>
+            <div class="preview-tags">
+              <span class="preview-chip">Open Source</span>
+              <span class="preview-chip">Windows</span>
+              <span class="preview-chip">Large File Transfer</span>
+            </div>
             <br><br>
             <button class="preview-button" type="button">Sample Button</button>
             <br>
